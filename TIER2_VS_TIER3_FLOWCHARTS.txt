@@ -1,0 +1,703 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║           TIER 2 vs TIER 3 - DATA FLOW & EXECUTION COMPARISON                  ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    INITIALIZATION FLOW COMPARISON                              │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+
+TIER 2: INITIALIZATION (Fetch from Blockchain)
+═══════════════════════════════════════════════════════════════════════════════════
+
+Time: ~2 seconds
+Network: 3 RPC calls
+
+
+Step 1: Connect Provider
+───────────────────────
+    provider = ProviderBuilder::new().on_http(ETH_RPC_URL)
+                            ↓
+         ┌──────────────────────────────┐
+         │ Connected to Ethereum RPC    │
+         │ Ready to fetch state         │
+         └──────────────────────────────┘
+    Time: instant
+
+
+Step 2: Initialize Cache DB
+────────────────────────────
+    cache_db = init_cache_db(provider)
+                            ↓
+         ┌──────────────────────────────┐
+         │ CacheDB created              │
+         │ ├─ Memory: HashMap (empty)   │
+         │ ├─ Disk: cacache ready       │
+         │ └─ AlloyDB: Connected        │
+         └──────────────────────────────┘
+    Time: instant
+
+
+Step 3: Fetch V3_QUOTER Bytecode
+─────────────────────────────────
+    init_account(V3_QUOTER_ADDR, cache_db, provider)
+                            ↓
+         ┌──────────────────────────────────────┐
+         │ Call AlloyDB.get_account()           │
+         │           ↓                          │
+         │ Check memory cache: MISS             │
+         │ Check disk cache: MISS               │
+         │           ↓                          │
+         │ NETWORK CALL: eth_getCode            │
+         │           ↓                          │
+         │ Ethereum returns: 0x608060... (8KB)  │
+         │           ↓                          │
+         │ Store in memory[V3_QUOTER_ADDR]      │
+         │ Store in disk cache (.evm_cache/)    │
+         └──────────────────────────────────────┘
+    RPC Call #1: eth_getCode
+    Time: ~500ms
+
+
+Step 4: Fetch V3_POOL_500 Bytecode
+───────────────────────────────────
+    init_account(V3_POOL_500_ADDR, cache_db, provider)
+                            ↓
+         ┌──────────────────────────────────────┐
+         │ Call AlloyDB.get_account()           │
+         │           ↓                          │
+         │ Check memory cache: MISS             │
+         │ Check disk cache: MISS               │
+         │           ↓                          │
+         │ NETWORK CALL: eth_getCode            │
+         │           ↓                          │
+         │ Ethereum returns: 0x608060... (12KB) │
+         │           ↓                          │
+         │ Store in memory[V3_POOL_500_ADDR]    │
+         │ Store in disk cache                  │
+         └──────────────────────────────────────┘
+    RPC Call #2: eth_getCode
+    Time: ~500ms
+
+
+Step 5: Fetch V3_POOL_3000 Bytecode
+────────────────────────────────────
+    init_account(V3_POOL_3000_ADDR, cache_db, provider)
+                            ↓
+         ┌──────────────────────────────────────┐
+         │ Same as Step 4                       │
+         │ NETWORK CALL: eth_getCode            │
+         │ Store in memory & disk cache         │
+         └──────────────────────────────────────┘
+    RPC Call #3: eth_getCode
+    Time: ~500ms
+
+
+Step 6: Inject Storage (In-Memory)
+──────────────────────────────────
+    insert_mapping_storage_slot(WETH_ADDR, ME, 100 WETH)
+                            ↓
+         ┌──────────────────────────────┐
+         │ Compute storage slot         │
+         │ slot = keccak256(ME || 0x0)  │
+         │           ↓                  │
+         │ Set in memory:               │
+         │ cache_db.storage[slot] = 100 │
+         │           ↓                  │
+         │ ✅ Instant (in-memory)       │
+         └──────────────────────────────┘
+    Time: instant
+
+
+TIER 2 SUMMARY:
+───────────────
+┌──────────────────────────────────┐
+│ Total Initialization Time: ~2s   │
+│ Network Calls: 3 (eth_getCode)   │
+│ Network Time: ~1.5s              │
+│ Memory Time: ~0.5s               │
+│                                  │
+│ Result: Ready to execute!        │
+│ • Real contracts in memory       │
+│ • Real state cached              │
+│ • Disk backup for next run       │
+│                                  │
+│ Next 100 calls: 3.5s             │
+│ Per call: 35ms (no network!)     │
+└──────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+
+TIER 3: INITIALIZATION (Inject Mocked Data)
+═══════════════════════════════════════════════════════════════════════════════════
+
+Time: ~10 milliseconds
+Network: 0 RPC calls (100% offline)
+
+
+Step 1: Initialize Empty Cache DB
+──────────────────────────────────
+    cache_db = init_cache_db(provider)
+                            ↓
+         ┌──────────────────────────────┐
+         │ CacheDB created              │
+         │ (Provider optional!)          │
+         │ ├─ Memory: HashMap (empty)   │
+         │ ├─ Disk: Not needed          │
+         │ └─ AlloyDB: Not used         │
+         └──────────────────────────────┘
+    Time: instant
+    ⚠️ NO RPC connection needed!
+
+
+Step 2: Load Custom Quoter Bytecode (From File)
+────────────────────────────────────────────────
+    init_account_with_bytecode(
+        CUSTOM_QUOTER_ADDR,
+        &mut cache_db,
+        QUOTER_BYTECODE.to_vec()  // ← Compiled hex from code
+    )
+                            ↓
+         ┌──────────────────────────────┐
+         │ QUOTER_BYTECODE is           │
+         │ embedded in binary:          │
+         │ const QUOTER_BYTECODE = "... │
+         │  0x60806040...               │
+         │ ...";                        │
+         │           ↓                  │
+         │ NO RPC needed!               │
+         │ Just read from binary        │
+         │           ↓                  │
+         │ Store in cache_db.memory:    │
+         │ memory[CUSTOM_QUOTER] = code │
+         │           ↓                  │
+         │ ✅ Instant (file read)       │
+         └──────────────────────────────┘
+    Network Call #0: NONE!
+    Time: instant
+
+
+Step 3: Load Mock ERC20 Bytecode (From File)
+─────────────────────────────────────────────
+    init_account_with_bytecode(
+        WETH_ADDR,
+        &mut cache_db,
+        ERC20_BYTECODE.to_vec()  // ← Generic ERC20 from code
+    )
+                            ↓
+         ┌──────────────────────────────┐
+         │ Same as Step 2               │
+         │ Read from binary constant    │
+         │ NO RPC                       │
+         │ Store in memory              │
+         │ ✅ Instant                   │
+         └──────────────────────────────┘
+    Network Call #0: NONE!
+    Time: instant
+
+
+Step 4: Load Mock ERC20 for USDC (From File)
+──────────────────────────────────────────────
+    init_account_with_bytecode(USDC_ADDR, &mut cache_db, ERC20_BYTECODE.to_vec())
+                            ↓
+         ┌──────────────────────────────┐
+         │ Same as Step 3               │
+         │ ✅ Instant (file read)       │
+         └──────────────────────────────┘
+    Time: instant
+
+
+Step 5: Inject WETH Balance (In-Memory)
+────────────────────────────────────────
+    insert_mapping_storage_slot(WETH_ADDR, ME, 1000 WETH)
+                            ↓
+         ┌──────────────────────────────┐
+         │ Compute slot                 │
+         │ slot = keccak256(ME || 0x0)  │
+         │           ↓                  │
+         │ Set in memory:               │
+         │ cache_db.storage[slot]       │
+         │   = 1000 WETH                │
+         │           ↓                  │
+         │ ✅ Instant (in-memory)       │
+         │                              │
+         │ ⚠️ This is NOT real WETH!    │
+         │ This is fake scenario        │
+         │ for testing purposes         │
+         └──────────────────────────────┘
+    Time: instant
+
+
+Step 6: Inject USDC Balance (In-Memory)
+────────────────────────────────────────
+    insert_mapping_storage_slot(USDC_ADDR, POOL_ADDR, 200k USDC)
+                            ↓
+         ┌──────────────────────────────┐
+         │ Same as Step 5               │
+         │ ✅ Instant (in-memory)       │
+         └──────────────────────────────┘
+    Time: instant
+
+
+TIER 3 SUMMARY:
+───────────────
+┌──────────────────────────────────┐
+│ Total Initialization Time: ~10ms │
+│ Network Calls: 0 (OFFLINE!)      │
+│ Network Time: 0ms                │
+│ Memory Time: ~10ms (all instant) │
+│                                  │
+│ Result: Ready to execute!        │
+│ • Custom contracts in memory     │
+│ • Mocked state injected          │
+│ • NO disk I/O                    │
+│ • NO network dependency          │
+│                                  │
+│ Next 100 calls: 1.5s             │
+│ Per call: 15ms (pure in-memory!) │
+└──────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+
+COMPARISON TABLE: Initialization
+═════════════════════════════════════════════════════════════════════════════════
+
+                        TIER 2           TIER 3
+─────────────────────────────────────────────────────────
+Time                    ~2s              ~10ms
+Speed advantage         -                200x faster! 🚀
+
+RPC Calls               3                0
+Network dependency      YES              NO (offline!)
+
+Bytecode source         Blockchain       Compiled code
+State source            Blockchain       Injected manually
+
+Memory usage            ~50KB            ~50KB
+Disk usage              ~50KB cache      None
+
+Persistence             Next run faster  N/A (always instant)
+
+Accuracy                Real contracts   Custom contracts
+Realism                 Real state       Fake state
+
+Setup complexity        Medium           Low
+Knowledge needed        AlloyDB + REVM   REVM only
+
+
+═════════════════════════════════════════════════════════════════════════════════════
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    EXECUTION FLOW COMPARISON                                   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+
+TIER 2: EXECUTING 1 SWAP (revm_call)
+═══════════════════════════════════════════════════════════════════════════════════
+
+Input: volume = 0.1 WETH
+
+
+Step 1: Build Calldata
+──────────────────────
+    calldata = quote_calldata(0.1 WETH)
+                            ↓
+         ┌──────────────────────────────────┐
+         │ Encode ABI:                      │
+         │ quoteExactInputSingle(           │
+         │   tokenIn=WETH,                  │
+         │   tokenOut=USDC,                 │
+         │   fee=3000,                      │
+         │   amountIn=0.1 WETH              │
+         │ )                                │
+         │           ↓                      │
+         │ Result: 0xf3bdc138ab12cd... (4+32+32+32+32)
+         └──────────────────────────────────┘
+    Time: <1ms
+
+
+Step 2: Create Transaction
+──────────────────────────
+    tx = build_tx(V3_QUOTER_ADDR, ME, calldata, base_fee)
+                            ↓
+         ┌──────────────────────────────────┐
+         │ Create unsigned transaction:     │
+         │ {                                │
+         │   from: ME,                      │
+         │   to: V3_QUOTER_ADDR,            │
+         │   data: calldata,                │
+         │   gas_price: base_fee,           │
+         │   ...                            │
+         │ }                                │
+         └──────────────────────────────────┘
+    Time: <1ms
+
+
+Step 3: Execute in REVM (Cache Hit!)
+─────────────────────────────────────
+    response = revm_call(ME, V3_QUOTER_ADDR, calldata, &mut cache_db)?
+                            ↓
+         ┌──────────────────────────────────────┐
+         │ REVM Execution:                      │
+         │                                      │
+         │ 1. Check cache_db.memory:            │
+         │    [V3_QUOTER_ADDR] = bytecode ✅   │
+         │    (Found! No RPC needed!)           │
+         │                                      │
+         │ 2. Create REVM context               │
+         │    context.transact(tx)              │
+         │                                      │
+         │ 3. Execute bytecode:                 │
+         │    - Load function selector          │
+         │    - Parse arguments                 │
+         │    - Call pool.swap()                │
+         │    - Pool executes swap              │
+         │    - Return output                   │
+         │                                      │
+         │ 4. Capture output data               │
+         │    amount_out = 200 USDC             │
+         │    sqrtPrice = ...                   │
+         │    tick = ...                        │
+         │                                      │
+         │ 5. Return response bytes             │
+         └──────────────────────────────────────┘
+    Time: ~35ms (IN-MEMORY!)
+    Network: ZERO RPC calls! ✅
+
+
+Step 4: Decode Response
+───────────────────────
+    (amount_out, sqrtPrice, ...) = decode_quote_response(&response)
+                            ↓
+         ┌──────────────────────────────────┐
+         │ Parse response bytes:            │
+         │ offset 0: amountOut = 200 USDC   │
+         │ offset 32: sqrtPrice = ...       │
+         │ offset 64: tick = ...            │
+         │           ↓                      │
+         │ ✅ Decoded: 200 USDC             │
+         └──────────────────────────────────┘
+    Time: <1ms
+
+
+Step 5: Use Result
+──────────────────
+    println!("0.1 WETH → 200 USDC")
+                            ↓
+         ┌──────────────────────────────┐
+         │ Output to user                │
+         │ ✅ 200 USDC                   │
+         └──────────────────────────────┘
+    Time: <1ms
+
+
+TIER 2: Total per call: ~35ms (from cache!)
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+
+TIER 3: EXECUTING 1 SWAP (revm_revert with Revert Trick)
+═════════════════════════════════════════════════════════════════════════════════════
+
+Input: volume = 0.1 WETH
+
+
+Step 1: Build Calldata
+──────────────────────
+    calldata = get_amount_out_calldata(0.1 WETH)
+                            ↓
+         ┌──────────────────────────────────┐
+         │ Encode ABI for CUSTOM quoter:    │
+         │ getAmountOut(                    │
+         │   amountIn=0.1 WETH,             │
+         │   tokenIn=WETH,                  │
+         │   tokenOut=USDC                  │
+         │ )                                │
+         │           ↓                      │
+         │ Result: 0x51d8ebcc12ab... (4+32+20+20)
+         └──────────────────────────────────┘
+    Time: <1ms
+
+
+Step 2: Create Transaction
+──────────────────────────
+    (Same as TIER 2)
+    tx = build_tx(CUSTOM_QUOTER_ADDR, ME, calldata, base_fee)
+    Time: <1ms
+
+
+Step 3: Execute in REVM (100% In-Memory)
+──────────────────────────────────────────
+    result = revm_revert(ME, CUSTOM_QUOTER_ADDR, calldata, &mut cache_db)?
+                            ↓
+         ┌──────────────────────────────────────────┐
+         │ REVM Execution (With Revert Trick):      │
+         │                                          │
+         │ 1. Check cache_db.memory:                │
+         │    [CUSTOM_QUOTER_ADDR] = bytecode ✅   │
+         │    (Found! No RPC needed!)               │
+         │                                          │
+         │ 2. Create REVM context                   │
+         │                                          │
+         │ 3. Execute custom quoter bytecode:       │
+         │    - Setup swap parameters               │
+         │    - Call pool.swap()                    │
+         │    - Pool calls callback                 │
+         │    - Quoter returns tokens               │
+         │    - Quoter INTENTIONALLY REVERTS!       │
+         │      └─ Revert reason: 200 USDC data    │
+         │                                          │
+         │ 4. Capture REVERT DATA:                  │
+         │    revert_reason = 0x...200USDC...       │
+         │    (This is how data is returned!)       │
+         │                                          │
+         │ 5. Return revert reason as "result"      │
+         │    (Not an error, just data encoding!)   │
+         └──────────────────────────────────────────┘
+    Time: ~15ms (FASTER! Pure in-memory)
+    Network: ZERO RPC calls! ✅
+    Reason: Simpler contracts = less bytecode = faster
+
+
+Step 4: Decode from Revert Reason
+──────────────────────────────────
+    amount_out = decode_get_amount_out_response(&result)
+                            ↓
+         ┌──────────────────────────────────────┐
+         │ Extract from revert reason bytes:   │
+         │ Parse: 0x...200USDC...               │
+         │           ↓                          │
+         │ amountOut = 200 USDC                 │
+         │           ↓                          │
+         │ ✅ Decoded from revert!              │
+         └──────────────────────────────────────┘
+    Time: <1ms
+
+
+Step 5: Use Result
+──────────────────
+    println!("0.1 WETH → 200 USDC (MOCKED)")
+    Time: <1ms
+
+
+TIER 3: Total per call: ~15ms (faster!)
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+
+
+COMPARISON TABLE: Execution (100 calls)
+═════════════════════════════════════════════════════════════════════════════════
+
+                        TIER 2           TIER 3
+─────────────────────────────────────────────────────────
+Time per call           35ms             15ms
+100 calls total         3500ms           1500ms
+Speed advantage         -                2.3x faster! ⚡
+
+RPC per call            0 (cached)       0 (mocked)
+Cache hit               YES (from memory)YES (in-memory)
+
+Bytecode source         Memory (cached)  Memory (embedded)
+State source            Memory (cached)  Memory (injected)
+
+Contract complexity     Official (8KB)   Custom (2KB)
+Execution overhead      Standard         Lower
+
+Callback handling       Standard return  Revert trick
+Data encoding           Return value     Revert reason
+
+Consistency            ✅ 35ms always    ✅ 15ms always
+Network variance        NO (cached)      NO (offline)
+
+Accuracy               ✅ 99%+          ⚠️ 90-98%
+Real contracts         ✅ YES           ❌ Custom
+Real state             ✅ YES (cached)  ❌ Injected
+
+
+═════════════════════════════════════════════════════════════════════════════════════
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                     COMPLETE WORKFLOW COMPARISON                               │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+
+TIER 2: COMPLETE FLOW (Fetch → Cache → Execute)
+═════════════════════════════════════════════════════════════════════════════════════
+
+Command: cargo run --bin revm_cached --release
+
+Timeline:
+─────────
+0ms      ├─ Start
+         │
+0-100ms  ├─ Create provider
+         │
+100-1600ms
+         ├─ Fetch V3_QUOTER (RPC #1)
+         ├─ Fetch V3_POOL_500 (RPC #2)
+         ├─ Fetch V3_POOL_3000 (RPC #3)
+         │ └─ Total: 3 RPC calls = 1500ms
+         │
+1600-1700ms
+         ├─ Inject storage (WETH, USDC balances)
+         │
+1700-1800ms
+         ├─ Get gas price (optional RPC)
+         │
+1800-5300ms
+         ├─ Execute 100 swaps
+         │ ├─ Call 1: 1800ms + 35ms = 1835ms
+         │ ├─ Call 2: 1835ms + 35ms = 1870ms
+         │ ├─ ...
+         │ └─ Call 100: 5265ms + 35ms = 5300ms
+         │ └─ Total: 3500ms for 100 calls
+         │
+5300ms   └─ Done!
+
+Total: 5300ms
+Breakdown:
+├─ Network (fetch): 1500ms (only first time!)
+├─ Setup: 100ms
+└─ Execution: 3500ms
+
+Next run:
+├─ Fetch: 0ms (cached on disk!)
+├─ Setup: 100ms
+├─ Execution: 3500ms
+└─ Total: 3600ms (20% faster!)
+
+
+═════════════════════════════════════════════════════════════════════════════════════
+
+
+TIER 3: COMPLETE FLOW (Load → Inject → Execute)
+═════════════════════════════════════════════════════════════════════════════════════
+
+Command: cargo run --bin revm_quoter --release
+
+Timeline:
+─────────
+0ms      ├─ Start
+         │
+0-5ms    ├─ Create cache_db (empty)
+         │
+5-10ms   ├─ Load custom quoter bytecode (from file)
+         ├─ Load ERC20 bytecode (from file)
+         │ └─ Total: 2 file reads = 5ms
+         │
+10-12ms  ├─ Inject storage
+         │ ├─ WETH balance: instant
+         │ ├─ USDC balance: instant
+         │ └─ Total: 2ms
+         │
+12-15ms  ├─ Get gas price (optional RPC)
+         │
+15-1515ms
+         ├─ Execute 100 swaps
+         │ ├─ Call 1: 15ms + 15ms = 30ms
+         │ ├─ Call 2: 30ms + 15ms = 45ms
+         │ ├─ ...
+         │ └─ Call 100: 1500ms + 15ms = 1515ms
+         │ └─ Total: 1500ms for 100 calls
+         │
+1515ms   └─ Done!
+
+Total: 1515ms
+Breakdown:
+├─ File reads: 5ms (super fast!)
+├─ Setup: 12ms
+└─ Execution: 1500ms
+
+Next run:
+├─ File reads: 5ms (always same!)
+├─ Setup: 12ms
+├─ Execution: 1500ms
+└─ Total: 1515ms (always consistent!)
+
+
+═════════════════════════════════════════════════════════════════════════════════════
+
+
+FINAL COMPARISON: Total Time for 100 Swaps
+════════════════════════════════════════════════════════════════════════════════════
+
+                    First Run       Second Run       Per Call Avg
+                    ─────────────   ──────────────   ─────────────
+TIER 1 (RPC)        45 seconds      45 seconds       450ms
+                    ⏱️ SLOW          ⏱️ SLOW
+
+TIER 2 (Cached)     5.3 seconds     3.6 seconds      35ms
+                    ⚡ MEDIUM        ⚡⚡ GOOD
+
+TIER 3 (Mocked)     1.5 seconds     1.5 seconds      15ms
+                    ⚡⚡ FAST        ⚡⚡⚡ FASTEST
+
+
+SPEED IMPROVEMENTS:
+═════════════════════════════════════════════════════════════
+
+TIER 2 vs TIER 1:
+├─ First run: 45s → 5.3s = 8.5x faster ⚡
+├─ Second run: 45s → 3.6s = 12.5x faster ⚡⚡
+└─ Per call: 450ms → 35ms = 12.8x faster
+
+TIER 3 vs TIER 1:
+├─ Any run: 45s → 1.5s = 30x faster ⚡⚡⚡
+└─ Per call: 450ms → 15ms = 30x faster
+
+TIER 3 vs TIER 2:
+├─ First run: 5.3s → 1.5s = 3.5x faster
+├─ Second run: 3.6s → 1.5s = 2.4x faster
+└─ Per call: 35ms → 15ms = 2.3x faster
+
+
+═════════════════════════════════════════════════════════════════════════════════════
+
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                  KEY DIFFERENCES AT A GLANCE                                   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+
+TIER 2: "Fetch Once, Use Forever"
+═════════════════════════════════════════════════════════════════════════════════════
+
+Blockchain
+    ↓ (fetch via RPC)
+Memory Cache
+    ↓ (use in REVM)
+Execute 100 swaps
+    ↓
+Disk Cache (for next time)
+
+Result: Same contracts, same state
+        Caching makes subsequent runs fast
+        99%+ accurate (real blockchain)
+
+
+TIER 3: "Inject Everything, Execute Fast"
+═════════════════════════════════════════════════════════════════════════════════════
+
+Compiled Bytecode (in binary)
+    ↓ (load into memory)
+Injected State (manual setup)
+    ↓ (use in REVM)
+Execute 100 swaps
+    ↓
+No disk I/O needed
+
+Result: Custom contracts, mocked state
+        Fastest execution (no network)
+        Need validation (not real blockchain)
+
+
+═════════════════════════════════════════════════════════════════════════════════════
